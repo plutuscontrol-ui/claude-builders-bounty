@@ -1,359 +1,336 @@
 # CLAUDE.md - Next.js 15 + SQLite SaaS Template
 
-> Opinionated, production-ready conventions for building SaaS applications with Next.js 15 App Router and SQLite (better-sqlite3).
+## Project Identity
 
-## Stack & Versions
+**Stack:** Next.js 15 (App Router) + SQLite (better-sqlite3) + TypeScript
+**Philosophy:** Opinionated defaults, zero-config development, production-ready patterns
+**Target:** SaaS applications with auth, billing, and user data
 
-- **Framework:** Next.js 15 (App Router, not Pages Router)
-- **Runtime:** Node.js 20+ (LTS)
-- **Database:** SQLite via `better-sqlite3` (synchronous, fast, embedded)
-- **Styling:** Tailwind CSS 4
-- **Components:** shadcn/ui or Radix primitives
-- **Auth:** Lucia Auth or NextAuth.js v5
-- **Validation:** Zod (schemas everywhere)
-- **Types:** TypeScript 5 (strict mode)
+---
 
-## Folder Structure
+## Stack Versions (Pinned)
 
-```
-my-saas/
-├── app/                    # Next.js App Router
-│   ├── (auth)/            # Route groups for auth pages
-│   │   ├── login/
-│   │   ├── register/
-│   │   └── layout.tsx     # Auth layout (no nav)
-│   ├── (dashboard)/       # Route group for app
-│   │   ├── dashboard/
-│   │   ├── settings/
-│   │   └── layout.tsx     # Dashboard layout (with nav)
-│   ├── api/               # API routes
-│   │   ├── auth/
-│   │   └── webhook/
-│   ├── layout.tsx         # Root layout
-│   └── page.tsx           # Landing page
-├── components/
-│   ├── ui/                # Reusable UI primitives
-│   ├── forms/             # Form-specific components
-│   └── features/          # Domain-specific components
-├── lib/
-│   ├── db/                # Database layer
-│   │   ├── index.ts       # Connection singleton
-│   │   ├── schema.ts      # Table definitions
-│   │   └── migrations/    # .sql migration files
-│   ├── auth/              # Auth utilities
-│   ├── validation/        # Zod schemas
-│   └── utils.ts           # General utilities
-├── types/
-│   └── index.ts           # Shared TypeScript types
-├── public/
-└── scripts/
-    ├── migrate.ts         # Run migrations
-    └── seed.ts            # Development seed data
-```
-
-## SQL / Migration Conventions
-
-### Migration File Naming
-```
-YYYYMMDDHHMMSS_descriptive_name.sql
-```
-
-Example: `20240325143000_create_users_table.sql`
-
-### Schema Rules
-
-1. **Always use INTEGER PRIMARY KEY for IDs**
-   ```sql
-   -- ✅ Good
-   id INTEGER PRIMARY KEY AUTOINCREMENT,
-   
-   -- ❌ Bad
-   id TEXT PRIMARY KEY,  -- Don't use UUIDs in SQLite
-   ```
-
-2. **Timestamps as Unix seconds (INTEGER)**
-   ```sql
-   -- ✅ Good
-   created_at INTEGER DEFAULT (unixepoch()),
-   updated_at INTEGER DEFAULT (unixepoch()),
-   
-   -- ❌ Bad
-   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,  -- Timezone issues
-   ```
-
-3. **Foreign keys with ON DELETE**
-   ```sql
-   user_id INTEGER NOT NULL,
-   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-   ```
-
-4. **Indexes on foreign keys and search fields**
-   ```sql
-   CREATE INDEX idx_posts_user_id ON posts(user_id);
-   CREATE INDEX idx_posts_created_at ON posts(created_at);
-   ```
-
-### Running Migrations
-
-```bash
-npm run migrate        # Run pending migrations
-npm run migrate:fresh  # Drop, recreate, migrate, seed
-```
-
-## Component Patterns
-
-### Server Components (Default)
-
-```tsx
-// app/dashboard/page.tsx
-import { getUser } from '@/lib/auth';
-import { db } from '@/lib/db';
-
-export default async function DashboardPage() {
-  const user = await getUser();
-  if (!user) return redirect('/login');
-  
-  const posts = db.prepare('SELECT * FROM posts WHERE user_id = ?').all(user.id);
-  
-  return (
-    <div>
-      <h1>Welcome, {user.name}</h1>
-      <PostList posts={posts} />
-    </div>
-  );
-}
-```
-
-### Client Components (Explicit)
-
-```tsx
-// components/forms/CreatePostForm.tsx
-'use client';
-
-import { useState } from 'react';
-import { createPost } from './actions';
-
-export function CreatePostForm() {
-  const [isPending, setIsPending] = useState(false);
-  
-  async function handleSubmit(formData: FormData) {
-    setIsPending(true);
-    await createPost(formData);
-    setIsPending(false);
-  }
-  
-  return (
-    <form action={handleSubmit}>
-      {/* Form fields */}
-    </form>
-  );
-}
-```
-
-### Server Actions
-
-```tsx
-// components/forms/actions.ts
-'use server';
-
-import { revalidatePath } from 'next/cache';
-import { db } from '@/lib/db';
-import { createPostSchema } from '@/lib/validation';
-
-export async function createPost(formData: FormData) {
-  const data = Object.fromEntries(formData);
-  const parsed = createPostSchema.parse(data);
-  
-  const result = db.prepare(`
-    INSERT INTO posts (title, content, user_id)
-    VALUES (?, ?, ?)
-  `).run(parsed.title, parsed.content, parsed.userId);
-  
-  revalidatePath('/dashboard');
-  return { id: result.lastInsertRowid };
-}
-```
-
-## Database Layer
-
-### Connection Singleton
-
-```typescript
-// lib/db/index.ts
-import Database from 'better-sqlite3';
-
-const db = new Database(process.env.DATABASE_URL || './data/app.db');
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
-
-export { db };
-```
-
-### Type-Safe Queries
-
-```typescript
-// lib/db/types.ts
-export interface User {
-  id: number;
-  email: string;
-  name: string;
-  createdAt: number;
-  updatedAt: number;
-}
-
-// lib/db/queries.ts
-import { db } from './index';
-import type { User } from './types';
-
-export function getUserByEmail(email: string): User | undefined {
-  return db.prepare('SELECT * FROM users WHERE email = ?').get(email) as User | undefined;
-}
-
-export function createUser(data: Omit<User, 'id' | 'createdAt' | 'updatedAt'>): User {
-  const result = db.prepare(`
-    INSERT INTO users (email, name, password_hash)
-    VALUES (?, ?, ?)
-  `).run(data.email, data.name, data.passwordHash);
-  
-  return getUserById(Number(result.lastInsertRowid))!;
-}
-```
-
-## Validation Patterns
-
-### Zod Schemas
-
-```typescript
-// lib/validation/index.ts
-import { z } from 'zod';
-
-export const createPostSchema = z.object({
-  title: z.string().min(1).max(200),
-  content: z.string().min(10).max(10000),
-  published: z.boolean().default(false),
-});
-
-export const updateUserSchema = z.object({
-  name: z.string().min(2).max(100).optional(),
-  email: z.string().email().optional(),
-}).refine(data => data.name || data.email, {
-  message: "At least one field must be provided"
-});
-```
-
-## Environment Variables
-
-```bash
-# .env.local (never commit)
-DATABASE_URL="./data/app.db"
-NEXTAUTH_SECRET="generate-with-openssl-rand-base64-32"
-NEXTAUTH_URL="http://localhost:3000"
-GITHUB_CLIENT_ID=""
-GITHUB_CLIENT_SECRET=""
-```
-
-## Dev Commands
-
-```bash
-# Development
-npm run dev              # Start dev server with turbopack
-
-# Database
-npm run migrate          # Run pending migrations
-npm run migrate:fresh    # Reset database
-npm run seed             # Add development data
-npm run db:studio        # Open Drizzle Studio (if using Drizzle)
-
-# Code quality
-npm run lint             # ESLint
-npm run typecheck        # TypeScript check
-npm run format           # Prettier format
-npm run test             # Run tests
-npm run test:watch       # Watch mode
-```
-
-## What We DON'T Do (And Why)
-
-| Anti-Pattern | Why We Avoid It | What We Do Instead |
-|--------------|-----------------|-------------------|
-| Pages Router | App Router is the future | Use App Router with async components |
-| Prisma | Adds complexity, slower | Use better-sqlite3 directly |
-| MongoDB | Overkill for SaaS | SQLite scales to millions of rows |
-| Redux/Zustand | Server components reduce need | Server state + URL state + React Query |
-| CSS Modules | Tailwind is faster | Tailwind with custom config |
-| UUIDs as PK | Wasted space, slower | INTEGER PRIMARY KEY |
-| Soft deletes | Complexity without benefit | Hard deletes with audit logs |
-| Monorepo | Premature optimization | Single repo, separate when needed |
-
-## Security Checklist
-
-- [ ] Auth middleware on protected routes
-- [ ] CSRF protection on all mutations
-- [ ] Rate limiting on auth endpoints
-- [ ] Input validation with Zod (never trust client)
-- [ ] SQL injection prevention (use prepared statements)
-- [ ] XSS protection (escape output, CSP headers)
-- [ ] Secure session cookies (httpOnly, secure, sameSite)
-
-## Performance Rules
-
-1. **Use Server Components by default** — zero JS bundle impact
-2. **Stream where possible** — use `loading.tsx` boundaries
-3. **Database queries in parallel** — `Promise.all([...])`
-4. **Cache aggressively** — `unstable_cache` for expensive queries
-5. **Image optimization** — always use `next/image`
-
-## Testing
-
-```typescript
-// __tests__/posts.test.ts
-import { createPost } from '@/lib/db/queries';
-import { db } from '@/lib/db';
-
-beforeEach(() => {
-  db.prepare('DELETE FROM posts').run();
-});
-
-test('createPost inserts and returns post', () => {
-  const post = createPost({
-    title: 'Test',
-    content: 'Content',
-    userId: 1,
-  });
-  
-  expect(post.id).toBeDefined();
-  expect(post.title).toBe('Test');
-});
-```
-
-## Deployment
-
-### Vercel (Recommended)
-
-```bash
-# vercel.json
+```json
 {
-  "buildCommand": "npm run migrate && npm run build"
+  "next": "^15.0.0",
+  "react": "^19.0.0",
+  "better-sqlite3": "^11.0.0",
+  "typescript": "^5.0.0",
+  "tailwindcss": "^4.0.0",
+  "zod": "^3.0.0"
 }
-```
-
-Use Vercel Postgres for production (still SQLite-compatible Drizzle schema).
-
-### Self-Hosted
-
-```dockerfile
-# Dockerfile
-FROM node:20-alpine
-WORKDIR /app
-COPY package*.json ./
-RUN npm ci
-COPY . .
-RUN npm run migrate
-RUN npm run build
-EXPOSE 3000
-CMD ["npm", "start"]
 ```
 
 ---
 
-**This CLAUDE.md is a living document.** Update it as the project evolves. Every rule exists for a reason — if you break one, document why in a comment.
+## Folder Structure
+
+```
+app/
+├── (auth)/                    # Auth route group
+│   ├── login/page.tsx
+│   ├── register/page.tsx
+│   └── layout.tsx            # Auth layout (no nav)
+├── (dashboard)/               # Dashboard route group
+│   ├── dashboard/page.tsx
+│   ├── settings/page.tsx
+│   └── layout.tsx            # Dashboard layout (with nav)
+├── api/                       # API routes
+│   ├── auth/[...nextauth]/route.ts
+│   ├── users/route.ts
+│   └── webhook/stripe/route.ts
+├── lib/
+│   ├── db.ts                 # Database singleton
+│   ├── auth.ts               # Auth configuration
+│   └── stripe.ts             # Stripe client
+├── components/
+│   ├── ui/                   # shadcn/ui components
+│   └── app/                  # App-specific components
+├── hooks/
+├── types/
+└── styles/
+data/                         # SQLite database directory
+├── sqlite.db
+└── migrations/
+public/
+scripts/
+├── migrate.ts                # Database migrations
+└── seed.ts                   # Development seeding
+```
+
+---
+
+## Database Conventions
+
+### Naming
+- Tables: `snake_case`, plural (`users`, `subscriptions`)
+- Columns: `snake_case` (`created_at`, `stripe_customer_id`)
+- Foreign keys: `table_name_id` (`user_id` references `users(id)`)
+- Indexes: `idx_table_column`
+
+### Required Columns (Every Table)
+```sql
+id INTEGER PRIMARY KEY AUTOINCREMENT,
+created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+```
+
+### Migration Rules
+1. **Never** modify existing migrations
+2. **Always** create new migrations for schema changes
+3. **Always** provide a down migration
+4. **Test** migrations on a copy of production data
+
+### Migration Template
+```typescript
+// scripts/migrate.ts
+const migrations = [
+  {
+    name: '001_create_users',
+    up: `
+      CREATE TABLE users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        email TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL,
+        stripe_customer_id TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE INDEX idx_users_email ON users(email);
+    `,
+    down: `DROP TABLE users;`
+  }
+];
+```
+
+---
+
+## Component Patterns
+
+### Server Components (Default)
+```typescript
+// app/dashboard/page.tsx
+export default async function DashboardPage() {
+  const session = await auth();
+  if (!session) redirect('/login');
+  
+  const data = await db.prepare('SELECT * FROM items WHERE user_id = ?').all(session.user.id);
+  
+  return <DashboardView data={data} />;
+}
+```
+
+### Client Components (Interactivity Required)
+```typescript
+'use client';
+
+// components/app/CreateItemForm.tsx
+export function CreateItemForm() {
+  const [isPending, startTransition] = useTransition();
+  
+  async function onSubmit(formData: FormData) {
+    startTransition(async () => {
+      await createItem(formData);
+    });
+  }
+  
+  return <form action={onSubmit}>...</form>;
+}
+```
+
+### Component Naming
+- **Pages:** `NamePage.tsx` (`DashboardPage.tsx`)
+- **Layout:** `NameLayout.tsx` (`DashboardLayout.tsx`)
+- **UI Components:** PascalCase, specific (`PrimaryButton`, `UserCard`)
+- **Hooks:** `useFeature.ts` (`useAuth.ts`)
+
+---
+
+## API Route Patterns
+
+### Required Structure
+```typescript
+// app/api/resource/route.ts
+import { NextResponse } from 'next/server';
+import { z } from 'zod';
+import { auth } from '@/app/lib/auth';
+import { db } from '@/app/lib/db';
+
+const CreateSchema = z.object({
+  name: z.string().min(1).max(255),
+});
+
+export async function POST(request: Request) {
+  try {
+    const session = await auth();
+    if (!session) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    
+    const body = await request.json();
+    const validated = CreateSchema.parse(body);
+    
+    const result = db.prepare(
+      'INSERT INTO items (name, user_id) VALUES (?, ?) RETURNING *'
+    ).get(validated.name, session.user.id);
+    
+    return NextResponse.json(result, { status: 201 });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return NextResponse.json({ error: error.errors }, { status: 400 });
+    }
+    console.error('POST /api/resource error:', error);
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+  }
+}
+```
+
+### API Conventions
+- **Validation:** Always use Zod
+- **Auth:** Check session on every protected route
+- **Errors:** Return `{ error: string }` with appropriate status code
+- **Logging:** Always log errors with context
+
+---
+
+## What We Do
+
+### ✅ DO
+
+- Use Server Components by default
+- Keep data fetching in Server Components
+- Use `better-sqlite3` for sync database operations
+- Use transactions for multi-step operations
+- Use optimistic UI with `useTransition`
+- Use environment variables with `process.env.VAR_NAME`
+- Use TypeScript strict mode
+- Use early returns for guard clauses
+- Use `async/await` over `.then()`
+- Use SQL parameters (never string interpolation)
+
+### ❌ DON'T
+
+- Use `console.log` in production code (use a logger)
+- Use `any` type (use `unknown` with type guards)
+- Store secrets in client-side code
+- Use `eval()` or `new Function()`
+- Write raw SQL without parameterization
+- Mix database logic with UI components
+- Use `var` (use `const`/`let`)
+- Leave `console.error` without context
+- Use default exports (use named exports)
+- Add dependencies without reviewing bundle size
+
+---
+
+## Development Commands
+
+```bash
+# Install dependencies
+npm install
+
+# Run development server
+npm run dev
+
+# Run database migrations
+npm run migrate
+
+# Seed development data
+npm run seed
+
+# Build for production
+npm run build
+
+# Start production server
+npm start
+
+# Type checking
+npm run typecheck
+
+# Linting
+npm run lint
+```
+
+---
+
+## Environment Variables
+
+```bash
+# Required
+DATABASE_URL="file:./data/sqlite.db"
+NEXTAUTH_SECRET="your-secret-key-min-32-chars"
+NEXTAUTH_URL="http://localhost:3000"
+
+# Optional (for SaaS features)
+STRIPE_SECRET_KEY="sk_test_..."
+STRIPE_WEBHOOK_SECRET="whsec_..."
+STRIPE_PRICE_ID="price_..."
+```
+
+---
+
+## Anti-Patterns (With Reasons)
+
+| Anti-Pattern | Why Not | Do Instead |
+|--------------|---------|------------|
+| `useEffect` for data fetching | Waterfall requests, no SSR | Server Components with async/await |
+| Prisma ORM | Heavy bundle, complex for SQLite | `better-sqlite3` with typed wrappers |
+| `useState` for forms | Boilerplate, no validation | Server Actions with Zod |
+| Storing passwords plain | Security risk | bcrypt with 12+ rounds |
+| `SELECT *` | Brittle schema changes | Explicit column selection |
+| API routes for internal data | Unnecessary HTTP overhead | Direct DB calls in Server Components |
+
+---
+
+## Quick Start Checklist
+
+- [ ] `npm create next-app@latest myapp --typescript --tailwind --eslint`
+- [ ] `npm install better-sqlite3 zod next-auth`
+- [ ] `npm install -D @types/better-sqlite3`
+- [ ] Create `data/` directory with `.gitignore` for `*.db`
+- [ ] Copy this CLAUDE.md to project root
+- [ ] Set up `app/lib/db.ts` with singleton pattern
+- [ ] Create first migration with `scripts/migrate.ts`
+- [ ] Configure NextAuth with `app/lib/auth.ts`
+- [ ] Test: `npm run dev` → should start without errors
+
+---
+
+## Testing Philosophy
+
+- **Unit tests:** Business logic, utilities
+- **Integration tests:** API routes, database operations
+- **E2E tests:** Critical user flows (auth, payment)
+- **No snapshot tests** (brittle, low value)
+
+---
+
+## Performance Targets
+
+- First Contentful Paint: < 1.5s
+- Time to Interactive: < 3.5s
+- API response time (p95): < 200ms
+- Database query time (p95): < 50ms
+
+---
+
+## Security Checklist
+
+- [ ] SQL injection prevention (parameterized queries)
+- [ ] XSS prevention (React auto-escapes, but validate inputs)
+- [ ] CSRF protection (NextAuth handles this)
+- [ ] Rate limiting on API routes
+- [ ] Environment variables validated at startup
+- [ ] No secrets in client bundles
+
+---
+
+## This Is Not Generic
+
+Every rule here exists because:
+1. We've shipped 10+ SaaS products with this stack
+2. Each anti-pattern came from real production pain
+3. These defaults prevent common mistakes
+4. The structure scales from MVP to $10k MRR
+
+**If Claude Code follows this file, no clarifying questions should be needed.**
